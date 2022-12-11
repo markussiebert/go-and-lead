@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -43,7 +43,7 @@ var (
 		code: 200,
 		msg:  "Running...",
 	}
-	readinessStatus = status{
+	electionSataus = status{
 		code: 503,
 		msg:  "No leader elected",
 	}
@@ -58,9 +58,9 @@ func LivenessHandler(w http.ResponseWriter, r *http.Request) {
 
 // Handle readiness probe
 // Indicates whether the container is ready to respond to requests.
-func ReadinessHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(readinessStatus.code)
-	w.Write([]byte(readinessStatus.msg))
+func ElectionHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(electionSataus.code)
+	w.Write([]byte(electionSataus.msg))
 }
 
 func main() {
@@ -77,6 +77,8 @@ func GoAndLeadCmd() *cobra.Command {
 	var name string
 	var namespace string
 	var kubeconfig string
+	var svc string
+	var svcSelector string
 	var incluster bool
 	var port int
 
@@ -116,10 +118,12 @@ func GoAndLeadCmd() *cobra.Command {
 				}
 			}
 
-			client := kubernetes.NewForConfigOrDie(config)
-
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+
+			k8s := kubernetes.NewForConfigOrDie(config)
+
+			serviceClient := k8s.CoreV1().Services(namespace)
 
 			// listen for interrupts or the Linux SIGTERM signal and cancel
 			// our context, which the leader election code will observe and
@@ -139,7 +143,7 @@ func GoAndLeadCmd() *cobra.Command {
 					Name:      name,
 					Namespace: namespace,
 				},
-				Client: client.CoordinationV1(),
+				Client: k8s.CoordinationV1(),
 				LockConfig: resourcelock.ResourceLockConfig{
 					Identity: id,
 				},
@@ -159,7 +163,7 @@ func GoAndLeadCmd() *cobra.Command {
 					OnStoppedLeading: func() {
 						// we can do cleanup here
 						klog.Infof("leader lost: %s", id)
-						readinessStatus = status{
+						electionSataus = status{
 							code: 503,
 							msg:  fmt.Sprintf("successfully acquired lease %s/%s", namespace, name),
 						}
@@ -167,21 +171,46 @@ func GoAndLeadCmd() *cobra.Command {
 							code: 503,
 							msg:  fmt.Sprintf("successfully acquired lease %s/%s", namespace, name),
 						}
+						if svc != "" {
+							// Update svc and remove leader
+							klog.Infof("Updating svc ...")
+							svcToUpdate, errSvcGet := serviceClient.Get(ctx, svc, metav1.GetOptions{})
+							Fatal(errSvcGet)
+
+							if svcToUpdate.Spec.Selector[svcSelector] == id {
+								delete(svcToUpdate.Spec.Selector, svcSelector)
+								_, errSvcApply := serviceClient.Update(ctx, svcToUpdate, metav1.UpdateOptions{})
+								Fatal(errSvcApply)
+								klog.Infof("Updated svc, removed svc.Spec.Selector[%s]", svcSelector)
+							}
+						}
 						os.Exit(0)
 					},
 					OnNewLeader: func(identity string) {
 						// we're notified when new leader elected
 						if identity == id {
 							// We acquired the lease
-							readinessStatus = status{
+							electionSataus = status{
 								code: 200,
 								msg:  fmt.Sprintf("successfully acquired lease %s/%s", namespace, name),
 							}
+							if svc != "" {
+								// Update svc to match
+								klog.Infof("Updating svc ...")
+								svcToUpdate, errSvcGet := serviceClient.Get(ctx, svc, metav1.GetOptions{})
+								Fatal(errSvcGet)
+
+								svcToUpdate.Spec.Selector[svcSelector] = id
+								_, errSvcApply := serviceClient.Update(ctx, svcToUpdate, metav1.UpdateOptions{})
+								Fatal(errSvcApply)
+								klog.Infof("Updated svc.Spec.Selector[%s]=%s", svcSelector, id)
+							}
+
 							klog.Infof("successfully acquired lease %s/%s", namespace, name)
 							return
 						}
 						// Someone else acquired the lease
-						readinessStatus = status{
+						electionSataus = status{
 							code: 503,
 							msg:  fmt.Sprintf("new leader elected: %s", identity),
 						}
@@ -195,7 +224,7 @@ func GoAndLeadCmd() *cobra.Command {
 			 */
 			mux := http.NewServeMux()
 			addr := fmt.Sprintf(":%d", port)
-			mux.HandleFunc("/readiness", ReadinessHandler)
+			mux.HandleFunc("/election", ElectionHandler)
 			mux.HandleFunc("/liveness", LivenessHandler)
 			log.Printf("server is listening at %s...", addr)
 			http.ListenAndServe(addr, mux)
@@ -210,7 +239,8 @@ func GoAndLeadCmd() *cobra.Command {
 	rootCmd.Flags().StringVarP(&namespace, "namespace", "s", "default", "The namespace to use for the lease lock.")
 	rootCmd.Flags().StringVarP(&kubeconfig, "kubeconfig", "k", defaultKubeConfig, "The kubeconfig to use for interaction with kubernetis.")
 	rootCmd.Flags().BoolVarP(&incluster, "in-cluster", "c", true, "Use serviceaccount permissions to interact with kubernetis.")
-
+	rootCmd.Flags().StringVarP(&svc, "svc", "", "", "Update a k8s service and change the selector to match the leader id.")
+	rootCmd.Flags().StringVarP(&svcSelector, "svc-selector", "", "statefulset.kubernetes.io/pod-name", "Update the k8s service and change the selector to match the leader id.")
 	return rootCmd
 }
 
@@ -268,4 +298,10 @@ func bindFlags(cmd *cobra.Command, v *viper.Viper) {
 			cmd.Flags().Set(f.Name, fmt.Sprintf("%v", val))
 		}
 	})
+}
+
+func Fatal(err error) {
+	if err != nil {
+		panic(errors.Wrap(err, "Error:"))
+	}
 }
