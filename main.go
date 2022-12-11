@@ -34,7 +34,7 @@ type status struct {
 const (
 	defaultConfigFilename      = "go-and-lead.yaml"
 	defaultKubeConfig          = "~/kubeconfig"
-	envPrefix                  = "GOL"
+	envPrefix                  = "GAL"
 	replaceHyphenWithCamelCase = false
 )
 
