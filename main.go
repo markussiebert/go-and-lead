@@ -160,14 +160,17 @@ func GoAndLeadCmd() *cobra.Command {
 					OnStartedLeading: func(context.Context) {
 						for svc != "" {
 							// Update svc to match
-							klog.Infof("Updating svc ...")
+							klog.Infof("Checking svc ...")
 							svcToUpdate, errSvcGet := serviceClient.Get(ctx, svc, metav1.GetOptions{})
 							Fatal(errSvcGet)
 							if svcToUpdate.Spec.Selector[svcSelector] != id {
+								klog.Infof("svc needs update")
 								svcToUpdate.Spec.Selector[svcSelector] = id
 								_, errSvcApply := serviceClient.Update(ctx, svcToUpdate, metav1.UpdateOptions{})
 								Fatal(errSvcApply)
 								klog.Infof("Updated svc.Spec.Selector[%s]=%s", svcSelector, id)
+							} else {
+								klog.Infof("svc is ok")
 							}
 							time.Sleep(15 * time.Second)
 						}
