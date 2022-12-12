@@ -158,16 +158,24 @@ func GoAndLeadCmd() *cobra.Command {
 				RetryPeriod:     5 * time.Second,
 				Callbacks: leaderelection.LeaderCallbacks{
 					OnStartedLeading: func(context.Context) {
-						// Do nothing?!
+						for svc != "" {
+							// Update svc to match
+							klog.Infof("Updating svc ...")
+							svcToUpdate, errSvcGet := serviceClient.Get(ctx, svc, metav1.GetOptions{})
+							Fatal(errSvcGet)
+							if svcToUpdate.Spec.Selector[svcSelector] != id {
+								svcToUpdate.Spec.Selector[svcSelector] = id
+								_, errSvcApply := serviceClient.Update(ctx, svcToUpdate, metav1.UpdateOptions{})
+								Fatal(errSvcApply)
+								klog.Infof("Updated svc.Spec.Selector[%s]=%s", svcSelector, id)
+							}
+							time.Sleep(15 * time.Second)
+						}
 					},
 					OnStoppedLeading: func() {
 						// we can do cleanup here
 						klog.Infof("leader lost: %s", id)
 						electionSataus = status{
-							code: 503,
-							msg:  fmt.Sprintf("successfully acquired lease %s/%s", namespace, name),
-						}
-						livenessStatus = status{
 							code: 503,
 							msg:  fmt.Sprintf("successfully acquired lease %s/%s", namespace, name),
 						}
